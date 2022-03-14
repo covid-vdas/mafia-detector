@@ -1,4 +1,4 @@
-ONNX_PATH = "library/Detector/weights/best-0305-5.onnx"
+ONNX_PATH = "library/Detector/weights/best-0312-5.onnx"
 CLASS_PATH = "library/Detector/weights/vdas.names"
 
 DATA_NAME = "Oxford_Town_Centre"
@@ -18,4 +18,5 @@ OBJECT_DISTANCE = 400
 # Colors
 GREEN = (0, 255, 0)
 RED = (0, 0, 255)
-
+BLUE = (255, 0, 0)
+YELLOW = (0, 255, 255)
