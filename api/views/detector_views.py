@@ -35,19 +35,19 @@ class DetectorView(APIView):
             if request.data.get('video') is not None:
                 try:
                     video = request.FILES['video']
-                    obj_distance = request.data['distance']
+                    img_per_real = request.data['img_per_real']
                     # Save video to 'detect' folder
                     save_video_path = "%s\\%s" % (detect_path, video.name)
                     with open(save_video_path, "wb+") as vd:
                         for chunk in video.chunks():
                             vd.write(chunk)
 
-                    img = request.FILES['img']
+                    # img = request.FILES['img']
                     # Save image to 'detect' folder
-                    save_img_path = "%s\\%s" % (detect_path, img.name)
-                    with open(save_img_path, "wb+") as i:
-                        for chunk in img.chunks():
-                            i.write(chunk)
+                    # save_img_path = "%s\\%s" % (detect_path, img.name)
+                    # with open(save_img_path, "wb+") as i:
+                    #     for chunk in img.chunks():
+                    #         i.write(chunk)
                     detect_option = True
                 except Exception as e:
                     return Response({"status": "Wrong video file, image file or distance format"}, status=status.HTTP_400_BAD_REQUEST)
@@ -66,10 +66,12 @@ class DetectorView(APIView):
 
             # Detect person from user input
             if detect_option :
-                boxes = detect_from_video(save_video_path, img.name, obj_distance)
+                boxes = detect_from_video(save_video_path, img_per_real)
             else:
                 boxes = detect_from_img(img.name)
             return Response({'status': 'success', 'data' : boxes}, status=status.HTTP_200_OK)
         except Exception as e:
             print(e)
             return Response({"status": "error"}, status=status.HTTP_404_NOT_FOUND)
+
+
