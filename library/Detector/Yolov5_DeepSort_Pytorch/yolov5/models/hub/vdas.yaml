@@ -1,0 +1,8 @@
+path: ../images
+train: train/
+val: val/
+test: test/
+
+# Classes
+nc: 4
+names: ['person', 'no mask', 'mask', 'wrong mask']
