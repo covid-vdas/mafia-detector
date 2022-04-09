@@ -1,77 +1,325 @@
-import pathlib
+from library.Detector.object_detection import ObjectDetection
+# from library.Detector.object_tracking import detect_from_stream
+from django.http.response import StreamingHttpResponse
 from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework.request import Request
 from rest_framework import status, renderers
-from library.Detector.object_detector import detect_from_img
-from library.Detector.object_tracking import detect_from_video
+from rest_framework.response import Response
+import cv2
+import numpy as np
+from scipy.spatial import distance as dist
+import base64
+from io import BytesIO
+import math
+from PIL import Image
+import torch
+import torch.backends.cudnn as cudnn
 from mafiaDetector.settings import *
-import os
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.models.common import DetectMultiBackend
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.datasets import LoadImages, LoadStreams
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.general import (LOGGER, check_img_size, non_max_suppression, scale_coords,
+								  check_imshow, xyxy2xywh, increment_path)
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.torch_utils import select_device, time_sync
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.plots import Annotator, colors
+from library.Detector.Yolov5_DeepSort_Pytorch.deep_sort.utils.parser import get_config
+from library.Detector.Yolov5_DeepSort_Pytorch.deep_sort.deep_sort import DeepSort
+from library.Detector.Yolov5_DeepSort_Pytorch.config import *
 
 class DetectorView(APIView):
     renderer_classes = [renderers.JSONRenderer]
-    """
-        Detect friom image, video
-    """
-    def post(self, request):
-        try:
-            # Create folder to save img
-            detect_path = DETECT_ROOT
-            detected_path = DETECTED_ROOT
-            # Ensure that the path is created properly and will raise exception if the directory already exists
-            if not os.path.exists(detect_path):
-                pathlib.Path(detect_path).mkdir(parents=True, exist_ok=True)
-                pathlib.Path(detected_path).mkdir(parents=True, exist_ok=True)
 
-            # Initialize variables
-            img = ''
-            save_video_path = ''
-            obj_distance = ''
+    device = select_device()
+    cfg = get_config()
+    cfg.merge_from_file(DEEP_SORT_YAML_PATH)
 
-            ###
-            # Check that detect video or detect image
-            ###
-            # Detect from video
-            if request.data.get('video') is not None:
-                try:
-                    video = request.FILES['video']
-                    img_per_real = request.data['img_per_real']
-                    # Save video to 'detect' folder
-                    save_video_path = "%s\\%s" % (detect_path, video.name)
-                    with open(save_video_path, "wb+") as vd:
-                        for chunk in video.chunks():
-                            vd.write(chunk)
+    deepsort = DeepSort(DEEP_SORT_MODEL,
+                        device,
+                        max_dist=cfg.DEEPSORT.MAX_DIST,
+                        max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
+                        max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
+                        )
+    half = True
 
-                    # img = request.FILES['img']
-                    # Save image to 'detect' folder
-                    # save_img_path = "%s\\%s" % (detect_path, img.name)
-                    # with open(save_img_path, "wb+") as i:
-                    #     for chunk in img.chunks():
-                    #         i.write(chunk)
-                    detect_option = True
-                except Exception as e:
-                    return Response({"status": "Wrong video file, image file or distance format"}, status=status.HTTP_400_BAD_REQUEST)
-            # Detect from image
-            else :
-                try:
-                    img = request.FILES['img']
-                    # Save image to 'detect' folder
-                    save_img_path = "%s\\%s" % (detect_path, img.name)
-                    with open(save_img_path, "wb+") as f:
-                        for chunk in img.chunks():
-                            f.write(chunk)
-                    detect_option = False
-                except Exception as e:
-                    return Response({"status": "Wrong image format"}, status=status.HTTP_400_BAD_REQUEST)
+    # Load model
+    device = select_device()
+    model = DetectMultiBackend(YOLO_MODEL, device=device, dnn=True)
+    stride, names, pt, jit, _ = model.stride, model.names, model.pt, model.jit, model.onnx
+    imgsz = check_img_size([INPUT_WIDTH, INPUT_HEIGHT], s=stride)  # check image size
 
-            # Detect person from user input
-            if detect_option :
-                boxes = detect_from_video(save_video_path, img_per_real)
+    # make new output folder
+    Path(DETECT_ROOT).mkdir(parents=True, exist_ok=True)
+    Path(DETECTED_ROOT).mkdir(parents=True, exist_ok=True)
+    Path(str(DETECTED_ROOT) + '\\yeild').mkdir(parents=True, exist_ok=True)
+    Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
+
+    violate_dict = dict()
+
+    # type_input_path 1 stream, 2 img or video
+    def detect(self, path, ratio, type_input_path, type_obj = None):
+        source = path
+        # Initialize
+        self.half &= self.device.type != 'cpu'  # half precision only supported on CUDA
+
+        # Half
+        self.half &= self.pt and self.device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+        if self.pt:
+            self.model.model.half() if self.half else self.model.model.float()
+
+        # Dataloader
+        if type_input_path == 1:
+            cudnn.benchmark = True  # set True to speed up constant image size inference
+            dataset = LoadStreams(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
+            bs = len(dataset)  # batch_size
+        elif type_input_path == 2:
+            dataset = LoadImages(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
+            bs = 1  # batch_size
+
+        vid_path, vid_writer = [None] * bs, [None] * bs
+
+        # Get names
+        names = self.model.module.names if hasattr(self.model, 'module') else self.model.names
+
+        # extract what is in between the last '/' and last '.'
+        # txt_file_name = source.split('/')[-1].split('.')[0]
+        # txt_path = str(Path(save_dir)) + '/' + txt_file_name + '.txt'
+
+        if self.pt and self.device.type != 'cpu':
+            self.model(torch.zeros(1, 3, *self.imgsz).to(self.device).type_as(next(self.model.model.parameters())))  # warmup
+        dt, seen = [0.0, 0.0, 0.0, 0.0], 0
+
+
+
+        for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
+            t1 = time_sync()
+            img = torch.from_numpy(img).to(self.device)
+            img = img.half() if self.half else img.float()  # uint8 to fp16/32
+            img /= 255.0  # 0 - 255 to 0.0 - 1.0
+            if img.ndimension() == 3:
+                img = img.unsqueeze(0)
+            t2 = time_sync()
+            dt[0] += t2 - t1
+
+            # Inference
+            # visualize = increment_path(save_dir / Path(path[0]).stem, mkdir=True) if opt.visualize else False
+            pred = self.model(img, augment=True, visualize=False)
+            t3 = time_sync()
+            dt[1] += t3 - t2
+
+            # Apply NMS
+            pred = non_max_suppression(prediction=pred, conf_thres=0.5, iou_thres=0.5, classes=None, agnostic=False,
+                                       max_det=1000)
+            dt[2] += time_sync() - t3
+
+            # Process detections
+            for i, det in enumerate(pred):  # detections per image
+                seen += 1
+                if type_input_path == 1:  # batch_size >= 1
+                    p, im0, _ = path[i], im0s[i].copy(), dataset.count
+                    s += f'{i}: '
+                elif type_input_path == 2:
+                    p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
+
+                # p = Path(p)  # to Path
+                # save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
+                # s += '%gx%g ' % img.shape[2:]  # print string
+
+                annotator = Annotator(im0, line_width=2, pil=not ascii)
+
+                if det is not None and len(det):
+                    # Rescale boxes from img_size to im0 size
+                    det[:, :4] = scale_coords(
+                        img.shape[2:], det[:, :4], im0.shape).round()
+
+                    # Print results
+                    for c in det[:, -1].unique():
+                        n = (det[:, -1] == c).sum()  # detections per class
+                        s += f"{n} {names[int(c)]}{'s' * (n > 1)}, "  # add to string
+
+                    xywhs = xyxy2xywh(det[:, 0:4])
+                    confs = det[:, 4]
+                    clss = det[:, 5]
+
+                    # pass detections to deepsort
+                    t4 = time_sync()
+                    outputs = self.deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
+                    t5 = time_sync()
+                    dt[3] += t5 - t4
+
+                    # draw boxes for visualization
+                    if len(outputs) > 0:
+
+                        self.violate_dict = self.tracking_violate(outputs, ratio, self.violate_dict, type_obj)
+                        for j, (output, conf) in enumerate(zip(outputs, confs)):
+
+                            bboxes = output[0:4]
+                            id = output[4]
+                            cls = output[5]
+
+                            c = int(cls)  # integer class
+
+                            color = GREEN
+                            if self.violate_dict is not None and id in self.violate_dict.keys():
+                                if self.violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls == 0:
+                                    list_person_violate = []
+                                    img_person_violate = im0.copy()
+                                    annotator_img_person_violate = Annotator(img_person_violate, line_width=2,
+                                                                             pil=not ascii)
+                                    for out in outputs:
+                                        if out[5] == 0:
+                                            if self.cal_distance_img(bboxes, out[0:4]) <= MIN_DISTANCE * ratio:
+                                                list_person_violate.append([out[4], out[0:4]])
+                                                self.violate_dict[out[4]] = -1
+
+                                    self.violate_dict[id] = -1
+                                    for (id_person_violate, bbox) in list_person_violate:
+                                        label_img_person_violate = f'{id_person_violate} person {conf:.2f}'
+
+                                        annotator_img_person_violate.box_label(bbox, label, color=RED)
+                                    file_name = str(list_person_violate) + '.png'
+                                    save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name)
+
+                                    label = f'{id} {names[c]} {conf:.2f}'
+                                    annotator.box_label(bboxes, label, color=RED)
+                                    saved_img = annotator_img_person_violate.result()  # RGB img
+                                    saved_img = saved_img[..., ::-1]  # convert RGB to BGR img
+                                    img = Image.fromarray(saved_img, 'RGB')  # format BRG img to Image
+                                    img.save(save_img_path)
+
+                                if self.violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
+                                    file_name = str(bboxes) + '.png'
+                                    save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name)
+
+                                    label = f'{id} {names[c]} {conf:.2f}'
+                                    annotator.box_label(bboxes, label, color=RED)
+                                    saved_img = annotator.result()  # RGB img
+                                    saved_img = saved_img[..., ::-1]  # convert RGB to BGR img
+                                    img = Image.fromarray(saved_img, 'RGB')  # format BRG img to Image
+                                    img.save(save_img_path)
+
+                                    self.violate_dict[id] = -1
+                                    continue
+                                color = RED
+
+                            if type_obj is None:  # person and mask
+                                label = f'{id} {names[c]} {conf:.2f}'
+                                annotator.box_label(bboxes, label, color=color)
+                            elif type_obj == 'mask':  # only mask detection
+                                if cls != 0:
+                                    label = f'{id} {names[c]} {conf:.2f}'
+                                    annotator.box_label(bboxes, label, color=color)
+                            elif type_obj == 'person':  # only person detection
+                                if cls == 0:
+                                    label = f'{id} {names[c]} {conf:.2f}'
+                                    annotator.box_label(bboxes, label, color=color)
+                else:
+                    self.deepsort.increment_ages()
+                    LOGGER.info('No detections')
+
+                # Stream results
+                im0 = annotator.result()
+                cv2.imwrite(str(DETECTED_ROOT) + '\\yeild\\img.jpg', im0)
+                img_path = str(DETECTED_ROOT) + '\\yeild\\img.jpg'
+                yield (b'--frame\r\n'
+                       b'Content-Type: image/jpeg\r\n\r\n' + open(img_path, 'rb').read() + b'\r\n')
+
+    # ['person', 'no mask', 'mask', 'wrong mask']
+    def tracking_violate(self, outputs, ratio, violate_dict, type_obj):
+
+        boxes = []
+
+        for output in outputs:
+            if type_obj is None:  # person and mask
+                boxes.append([output[:4], output[4], output[5]])
+            elif type_obj == 'mask':  # only mask detection
+                if output[5] != 0:
+                    boxes.append([output[:4], output[4], output[5]])
+            elif type_obj == 'person':  # only person detection
+                if output[5] == 0:
+                    boxes.append([output[:4], output[4], output[5]])
+
+        ids = np.array([box[1] for box in boxes])
+        cent = []
+        # pop cua mask
+        temp_violate_dict = violate_dict.copy()
+        for vio in temp_violate_dict.keys():
+            if vio not in ids:
+                violate_dict.pop(vio, None)
+            if vio in ids and boxes[list(ids).index(vio)][2] == 2:
+                violate_dict.pop(vio, None)
+
+        for i, ((x, y, w, h), id_obj, c) in enumerate(boxes):
+            if c == 0:
+                cent.append((int(x + w / 2), int(y + h / 2)))
             else:
-                boxes = detect_from_img(img.name)
-            return Response({'status': 'success', 'data' : boxes}, status=status.HTTP_200_OK)
-        except Exception as e:
-            print(e)
-            return Response({"status": "error"}, status=status.HTTP_404_NOT_FOUND)
+                if violate_dict is not None and c != 2:
+                    if id_obj in violate_dict.keys() and violate_dict[id_obj] != -1:
+                        violate_dict[id_obj] = violate_dict[id_obj] + 1
+                    elif id_obj in violate_dict.keys() and violate_dict[id_obj] == -1:
+                        continue
+                    else:
+                        violate_dict[id_obj] = 1
+        # print(violate_dict)
+        # print(len(cent))
+        if len(cent) != 0:
+            D = dist.cdist(cent, cent, metric="euclidean")
+            temp_vio_person = set()
+            for i in range(0, D.shape[0]):
+                for j in range(i + 1, D.shape[1]):
+                    # check to see if the distance between any two
+                    # centroid pairs is less than the configured number
+                    # of centimeter
 
+                    # 138 pixel -> 500 cm
+                    # D[i, j] pixel -> 200 cm
+                    # distance = D[i, j] * KNOW_WIDTH / ref_img_width
+                    # print("D[i, j]: ", D[i, j])
 
+                    if D[i, j] < MIN_DISTANCE * ratio:  # ref_img_width / OBJECT_DISTANCE
+
+                        if violate_dict is not None:
+                            # distance = D[i, j] / ratio #real distance between two people
+
+                            if boxes[i][1] in violate_dict.keys() and violate_dict[boxes[i][1]] != -1:
+                                violate_dict[boxes[i][1]] = violate_dict[boxes[i][1]] + 1
+                            elif boxes[i][1] not in violate_dict.keys():
+                                violate_dict[boxes[i][1]] = 1
+
+                            if boxes[j][1] in violate_dict.keys() and violate_dict[boxes[j][1]] != -1:
+                                violate_dict[boxes[j][1]] = violate_dict[boxes[j][1]] + 1
+                            elif boxes[j][1] not in violate_dict.keys():
+                                violate_dict[boxes[j][1]] = 1
+                            temp_vio_person.add(boxes[i][1])
+                            temp_vio_person.add(boxes[j][1])
+
+            for idx, wrong_id_person in enumerate(ids):
+                if wrong_id_person not in temp_vio_person and boxes[idx][2] == 'person':
+                    violate_dict.pop(wrong_id_person, None)
+
+        print(violate_dict)
+        return violate_dict
+
+    def cal_distance_img(self, box1, box2):
+        x1 = box1[0] + box1[2] / 2
+        y1 = box1[1] + box1[3] / 2
+
+        x2 = box2[0] + box2[2] / 2
+        y2 = box2[1] + box2[3] / 2
+        return (((x2 - x1) ** 2) + ((y2 - y1) ** 2)) ** 0.5
+
+    def cal_distance_real(self, distance_img, ratio):
+        return distance_img / ratio
+
+    def get(self, request):
+        try:
+            # path = 'http://192.168.1.8:8080/video'
+            path = 'C:\\Users\\phuct\\Desktop\\HoangPhuc\\Social_Distance_Detection\\Yolov5_DeepSort_Pytorch\\' \
+                   'dataset\\pedestrians_5s.mp4'
+            ratio = 0.8
+            # stream_url = 'http://82.208.151.106/cgi-bin/faststream.jpg?stream=half&fps=15&rand=COUNTER'
+            # type_input_path 1 stream, 2 img or video
+            return StreamingHttpResponse(self.detect(path = path,
+                                                     ratio = ratio,
+                                                     type_input_path = 2,
+                                                     type_obj = None),
+                                         content_type='multipart/x-mixed-replace; boundary=frame', status=200)
+        except  Exception as e:
+            return StreamingHttpResponse(e, content_type='text', status=404)

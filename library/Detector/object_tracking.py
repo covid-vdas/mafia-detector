@@ -7,248 +7,220 @@ from library.Detector.object_config import *
 from math import sqrt, hypot
 from mafiaDetector.settings import *
 
+import cv2
+import numpy as np
+from scipy.spatial import distance as dist
+
+from PIL import Image
+import torch
+import torch.backends.cudnn as cudnn
+from mafiaDetector.settings import *
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.models.common import DetectMultiBackend
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.datasets import LoadImages, LoadStreams
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.general import (LOGGER, check_img_size, non_max_suppression, scale_coords,
+								  check_imshow, xyxy2xywh, increment_path)
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.torch_utils import select_device, time_sync
+from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.plots import Annotator, colors
+from library.Detector.Yolov5_DeepSort_Pytorch.deep_sort.utils.parser import get_config
+from library.Detector.Yolov5_DeepSort_Pytorch.deep_sort.deep_sort import DeepSort
+from library.Detector.Yolov5_DeepSort_Pytorch.config import *
+
 
 def detect_from_video(video_path, img_per_real):
+    source = video_path
+    device = select_device()
+    cfg = get_config()
+    cfg.merge_from_file(DEEP_SORT_YAML_PATH)
 
-    # Initialize Object Detection
-    od = ObjectDetection()
+    deepsort = DeepSort(DEEP_SORT_MODEL,
+                        device,
+                        max_dist=cfg.DEEPSORT.MAX_DIST,
+                        max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
+                        max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
+                        )
+    half = True
+    # Initialize
+    half &= device.type != 'cpu'  # half precision only supported on CUDA
 
-    # Initialize reference video
-    ref_video = cv2.VideoCapture(video_path)
+    Path(DETECTED_ROOT).mkdir(parents=True, exist_ok=True)  # make new output folder
 
-    # Get video dimension and set it to image
-    ref_video_shape = (int(ref_video.get(cv2.CAP_PROP_FRAME_WIDTH)), int(ref_video.get(cv2.CAP_PROP_FRAME_HEIGHT)))
+    # Directories
+    if type(YOLO_MODEL) is str:
+        exp_name = YOLO_MODEL.split(".")[0]
+    elif type(YOLO_MODEL) is list and len(YOLO_MODEL) == 1:
+        exp_name = YOLO_MODEL[0].split(".")[0]
+    else:
+        exp_name = "ensemble"
+    exp_name = exp_name + "_" + DEEP_SORT_MODEL.split('/')[-1].split('.')[0]
+    save_dir = increment_path(Path(DETECTED_ROOT) / exp_name, exist_ok=True)  # increment run if project name exists
+    save_dir.mkdir(parents=True, exist_ok=True)  # make dir
 
-    # Get distance of two person in pixel
-    # Besides, we also know real distance of two person in cm(param: obj_distance)
-    # So, we can calculate distance of any two person in frame
-    # ref_img_width = detect_distance(img_path, ref_video_shape, od)
+    # Load model
+    device = select_device()
+    model = DetectMultiBackend(YOLO_MODEL, device=device, dnn=True)
+    stride, names, pt, jit, _ = model.stride, model.names, model.pt, model.jit, model.onnx
+    imgsz = check_img_size([INPUT_WIDTH, INPUT_HEIGHT], s=stride)  # check image size
 
-    # Initialize count
+    # Half
+    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+    if pt:
+        model.model.half() if half else model.model.float()
+
+    # show_vid = check_imshow()
+
+    # Dataloader
+    dataset = LoadImages(source, img_size=imgsz, stride=stride, auto=pt and not jit)
+    bs = 1  # batch_size
+
+    vid_path, vid_writer = [None] * bs, [None] * bs
+
+    # Get names and colors
+    names = model.module.names if hasattr(model, 'module') else model.names
+
+    if pt and device.type != 'cpu':
+        model(torch.zeros(1, 3, *imgsz).to(device).type_as(next(model.model.parameters())))  # warmup
+    dt, seen = [0.0, 0.0, 0.0, 0.0], 0
+
+    violate = dict()
     count = 0
+    for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
+        t1 = time_sync()
+        img = torch.from_numpy(img).to(device)
+        img = img.half() if half else img.float()  # uint8 to fp16/32
+        img /= 255.0  # 0 - 255 to 0.0 - 1.0
+        if img.ndimension() == 3:
+            img = img.unsqueeze(0)
+        t2 = time_sync()
+        dt[0] += t2 - t1
 
-    # Initialize center point of previous frame
-    center_points_prev_frame = []
+        # prediction after detection
+        pred = model(img, augment=True, visualize=False)
+        t3 = time_sync()
+        dt[1] += t3 - t2
 
-    # Initialize dictionary to save object id : center point of bounding box
-    tracking_objects = {}
+        # Apply NMS
+        #
+        # conf_thres: object confidence threshold
+        # iou_thres	: IOU threshold for NMS
+        # classes	: filter by class: --class 0, or --class 16 17
+        # agnostic	: class-agnostic NMS
+        # max_det	: maximum detection per image
+        pred = non_max_suppression(prediction=pred, conf_thres=0.5, iou_thres=0.5, classes=None, agnostic=False,
+                                   max_det=1000)
+        dt[2] += time_sync() - t3
 
-    # Initialize id for each person
-    track_id = 0
+        # Process detections
+        # detections per image
+        for i, det in enumerate(pred):
 
-    # Create writer to save detected video to folder
-    writer = None
+            im0 = im0s.copy()
+            annotator = Annotator(im0, line_width=2, pil=not ascii)
 
-    # Save all social distance violations
-    # This array save object id : bounding box
-    bounding_box = []
+            if det is not None and len(det):
+                # Rescale boxes from img_size to im0 size
+                det[:, :4] = scale_coords(
+                    img.shape[2:], det[:, :4], im0.shape).round()
 
-    # Loop over video to detect violations
-    while True:
+                xywhs = xyxy2xywh(det[:, 0:4])
+                confs = det[:, 4]
+                clss = det[:, 5]
 
-        ret, frame = ref_video.read()
-        count += 1
+                # pass detections to deepsort
+                t4 = time_sync()
 
-        if not ret:
-            break
+                # pass detection bounding box to deep sort to tracking
+                outputs = deepsort.update(xywhs.cpu(), confs.cpu(), clss.cpu(), im0)
+                t5 = time_sync()
+                dt[3] += t5 - t4
 
-        # Point current frame
-        center_points_cur_frame = []
+                # draw boxes for visualization
+                if len(outputs) > 0:
 
-        # Detect all person in each frame
-        inputImage = od.format_yolov5(frame)
-        outs = od.detect(inputImage)
+                    # cent = np.array([(int(x + w/2), int(y + h/2)) for (x, y, w, h) in boxes])
+                    # boxes, class_names = [(output[:4], output[5]) for output in outputs]
+                    # print(boxes)
+                    violate = self.cal_distance(outputs, 0.8, violate)
+                    for j, (output, conf) in enumerate(zip(outputs, confs)):
+                        bboxes = output[0:4]
+                        id = output[4]
+                        cls = output[5]
+                        c = int(cls)  # integer class
+                        color = GREEN
 
-        # Get all person that confidence over the min constant value
-        class_ids, confidences, boxes = od.wrap_detection(inputImage, outs[0], is_person=False)
+                        if violate is not None:
+                            if id in violate.keys():
+                                if violate[id] >= 10:
+                                    count = count + 1
+                                    file_name = str(count) + '.png'
+                                    save_img_path = "%s\\%s" % (
+                                        'C:\\Users\\phuct\\Desktop\\HoangPhuc\\Social_Distance_Detection\\Yolov5_DeepSort_Pytorch\\output',
+                                        file_name)
 
-        # Only get person to tracking object
-        for (i, box) in enumerate(boxes):
-            if class_ids[i] == 0: 	#Person
-                (x, y, w, h) = box
-                cx = int((x + x + w) / 2)
-                cy = int((y + y + h) / 2)
-                center_points_cur_frame.append((cx, cy))
+                                    label = f'{id} {names[c]} {conf:.2f}'
+                                    annotator.box_label(bboxes, label, color=RED)
+                                    im0 = annotator.result()
+                                    img = Image.fromarray(im0, 'RGB')
+                                    img.save(save_img_path)
+
+                                    violate[id] = -1
+                                    continue
+                                # is_violate = True
+                                color = RED
+
+                        label = f'{id} {names[c]} {conf:.2f}'
+                        annotator.box_label(bboxes, label, color=color)
+
+                LOGGER.info(f'{s}Done. YOLO:({t3 - t2:.3f}s), DeepSort:({t5 - t4:.3f}s)')
+
             else:
-                if class_ids[i] == 1: # No mask
-                    color = BLUE
-                    name = 'no'
-                    cv2.rectangle(frame, box, BLUE, 2)
-                elif class_ids[i] == 2: # Mask
-                    color = GREEN
-                    name = 'mask'
-                    cv2.rectangle(frame, box, GREEN, 2)
-                elif class_ids[i] == 3: # Wrong mask
-                    color = YELLOW
-                    name = 'wrong'
-                    cv2.rectangle(frame, box, YELLOW, 2)
+                deepsort.increment_ages()
+                LOGGER.info('No detections')
 
-                cv2.putText(frame, name, (x + w - 20, y - 20), 0, 0.5, color, 2)
+            # Stream results
+            im0 = annotator.result()
 
-        # Only at the beginning we compare previous and current frame
-        if count <= 2:
-            for pt in center_points_cur_frame:
-                for pt2 in center_points_prev_frame:
-                    distance = hypot(pt2[0] - pt[0], pt2[1] - pt[1])
-                    # Check that center point in first frame move to new position which is less than 20 pixels
-                    if distance < 20:
-                        tracking_objects[track_id] = pt
-                        track_id += 1
+    cv2.imwrite(str(DETECTED_ROOT) + '\\frame.jpg', im0)
+    yield (b'--frame\r\n'
+           b'Content-Type: image/jpeg\r\n\r\n' + open(str(DETECTED_ROOT) + '\\frame.jpg', 'rb').read() + b'\r\n')
+
+
+def cal_distance(self, outputs, rate, violate):
+    boxes = np.array([(output[:4], output[4], output[5]) for output in outputs])
+    cent = []
+    for i, ((x, y, w, h), id_obj, c) in enumerate(boxes):
+
+        if c == 0:
+            cent.append((int(x + w / 2), int(y + h / 2)))
         else:
-            tracking_objects_copy = tracking_objects.copy()
-            center_points_cur_frame_copy = center_points_cur_frame.copy()
+            if violate is not None:
+                if id_obj in violate.keys() and violate[id_obj] != -1:
+                    violate[id_obj] = violate[id_obj] + 1
+                elif id_obj in violate.keys() and violate[id_obj] == -1:
+                    continue
+                else:
+                    violate[id_obj] = 1
+    if len(cent) != 0:
+        D = dist.cdist(cent, cent, metric="euclidean")
+        for i in range(0, D.shape[0]):
+            for j in range(i + 1, D.shape[1]):
+                # check to see if the distance between any two
+                # centroid pairs is less than the configured number
+                # of centimeter
 
-            for object_id, pt2 in tracking_objects_copy.items():
-                object_exists = False
-                for pt in center_points_cur_frame_copy:
-                    distance = hypot(pt2[0] - pt[0], pt2[1] - pt[1])
-                    # Check that center point in first frame move to new position which is less than 20 pixels
-                    if distance < 30:
-                        tracking_objects[object_id] = pt
-                        object_exists = True
-                        if pt in center_points_cur_frame:
-                            center_points_cur_frame.remove(pt)
-                        continue
+                # 138 pixel -> 500 cm
+                # D[i, j] pixel -> 200 cm
+                # distance = D[i, j] * KNOW_WIDTH / ref_img_width
+                # print("D[i, j]: ", D[i, j])
+                if D[i, j] < MIN_DISTANCE * rate:  # ref_img_width / OBJECT_DISTANCE
+                    if violate is not None:
+                        if boxes[i][1] in violate.keys() and violate[boxes[i][1]] != -1:
+                            violate[boxes[i][1]] = violate[boxes[i][1]] + 1
+                        elif boxes[i][1] not in violate.keys():
+                            violate[boxes[i][1]] = 1
 
-                # Remove IDs lost
-                if not object_exists:
-                    tracking_objects.pop(object_id)
+                        if boxes[j][1] in violate.keys() and violate[boxes[j][1]] != -1:
+                            violate[boxes[j][1]] = violate[boxes[j][1]] + 1
+                        elif boxes[j][1] not in violate.keys():
+                            violate[boxes[j][1]] = 1
 
-            # Add new IDs found
-            for pt in center_points_cur_frame:
-                tracking_objects[track_id] = pt
-                track_id += 1
-
-        # Get all center points in frame
-        # To detect social violations
-        center_points = np.array([(int(x + w / 2), int(y + h / 2)) for (x, y, w, h) in boxes])
-        if len(center_points) != 0:
-
-            D = dist.cdist(center_points, center_points, metric="euclidean")
-            # Set to save all violations that can be duplicated
-            violate = set()
-
-            for i in range(0, D.shape[0]):
-                for j in range(i + 1, D.shape[1]):
-                    # Check to see if the distance between any two
-                    # centroid pairs is less than the configured number
-                    # of centimeter
-
-                    # 138 pixel -> 500 cm
-                    # D[i, j] pixel -> 200 cm
-                    # distance = D[i, j] * KNOW_WIDTH / ref_img_width
-                    if D[i, j] < MIN_DISTANCE * int(img_per_real):
-                        (x1, y1, w1, h1) = boxes[i]
-                        (x2, y2, w2, h2) = boxes[j]
-                        cent1 = [int(x1 + w1 / 2), int(y1 + h1 / 2)]
-                        cent2 = [int(x2 + w2 / 2), int(y2 + h2 / 2)]
-
-                        distance = D[i, j] * int(img_per_real) / 100
-                        distance = round(distance, 2)
-
-                        cv2.line(frame, cent1, cent2, RED, 2)
-                        cv2.putText(frame, str(distance), (cent1[0], cent1[1] - 5), cv2.FONT_HERSHEY_SIMPLEX, .5, RED)
-                        violate.add(i)
-                        violate.add(j)
-        # Loop all bounding box to get object id and center point
-        # to draw necessary information and save violations
-        for (i, (bbox)) in enumerate(boxes):
-            # extract the bounding box and centroid coordinates, then
-            # initialize the color of the annotation
-            ob_id = -1
-            color = GREEN
-            (startX, startY, width, height) = bbox
-            cent = (int((startX + startX + width) / 2), int((startY + startY + height) / 2))
-
-            # if the index pair exists within the violation set, then
-            # update the color
-            for object_id, pt in tracking_objects.items():
-                if(pt[0] == cent[0] and pt[1] == cent[1]):
-                    ob_id = object_id
-                    break
-            if i in violate:
-                bounding_box.append([ob_id, bbox])
-                color = RED
-
-            # draw (1) a bounding box around the person and (2) the
-            # centroid coordinates of the person,
-            cv2.putText(frame, str(ob_id), (cent[0], cent[1]), 0, 0.5, color, 2)
-            cv2.rectangle(frame, bbox, color, 2)
-            cv2.putText(frame, str(confidences[i]), (startX, startY - 20), 0, 0.5, color, 2)
-
-        # Save detected video
-        video_save_path = "%s\\%s" % (DETECTED_ROOT, 'data.avi')
-        if writer is None:  # args["output"] != "" and
-            # initialize our video writer
-            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
-            writer = cv2.VideoWriter(video_save_path, fourcc, 15,
-                                     (frame.shape[1], frame.shape[0]), True)
-
-        # if the video writer is not None, write the frame to the output
-        # video file
-        if writer is not None:
-            writer.write(frame)
-
-        # Make a copy of the points
-        center_points_prev_frame = center_points_cur_frame.copy()
-
-    ref_video.release()
-    return bounding_box
-
-def detect_from_stream(frame, od):
-
-    # Detect all person in each frame
-    inputImage = od.format_yolov5(frame)
-    outs = od.detect(inputImage)
-
-    # Get all person that confidence over the min constant value
-    class_ids, confidences, boxes = od.wrap_detection(inputImage, outs[0], is_person=False)
-
-    # Loop all bounding box to get object id and center point
-    # to draw necessary information and save violations
-    for (i, (bbox)) in enumerate(boxes):
-
-        color = GREEN
-        (startX, startY, width, height) = bbox
-
-        cv2.rectangle(frame, bbox, color, 2)
-        cv2.putText(frame, str(od.classes[class_ids[i]]), (startX, startY - 20), cv2.FONT_HERSHEY_SIMPLEX, .5, GREEN)
-        cv2.putText(frame, str(confidences[i]), (startX + int(width/2), startY - 20), 0, 0.5, color, 2)
-
-    return frame
-
-# Scale width, height of img equal to video
-def scale_img_as_video(image, video):
-    image = imutils.resize(image,
-                           width=int(video.get(3)),
-                           height=int(video.get(4)))
-    return image
-
-# detect distance in pixel from exacly two people
-def detect_distance(img_name, video, od):
-    # Ensure that in img have exactly two person
-    image = cv2.imread(str(DETECT_ROOT / img_name))
-    # Scale width, height of img suitable with video
-    image = cv2.resize(image, video)
-
-    # Initialize reference image from user input
-    ref_image = od.format_yolov5(image)
-    outs = od.detect(ref_image)
-    _, _, boxes = od.wrap_detection(ref_image, outs[0], is_person=True)
-
-    # Calculate distance between two person
-    cent = np.array([(int(x + w / 2), int(y + h / 2)) for (x, y, w, h) in boxes])
-    dist = sqrt((cent[0][0] - cent[1][0]) ** 2 + (cent[0][1] - cent[1][1]) ** 2)
-
-    # Draw necessary information in image
-    for box in boxes:
-        cv2.rectangle(image, box, GREEN, 2)
-        cv2.line(image, cent[0], cent[1], GREEN, 1)
-        cv2.putText(image, str(round(dist, 2)),
-                    (int((cent[0][0] + cent[1][0]) / 2), int((cent[0][1] + cent[1][1]) / 2 - 20)),
-                    cv2.FONT_HERSHEY_SIMPLEX, .5, RED, 2)
-
-    # Save detected img to detected folder
-    cv2.imwrite(str(DETECTED_ROOT / img_name), image)
-
-    return dist
+        return violate
