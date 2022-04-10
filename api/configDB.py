@@ -3,6 +3,7 @@ import os
 from dotenv import load_dotenv
 
 
+
 def connectDB():
     load_dotenv()
     url = r'mongodb+srv://{user}:{password}@cluster0.ftuaa.mongodb.net/{db_name}?retryWrites=true&w=majority'.format(

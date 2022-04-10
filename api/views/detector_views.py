@@ -10,7 +10,8 @@ from scipy.spatial import distance as dist
 import base64
 from io import BytesIO
 import math
-from PIL import Image
+from datetime import datetime
+from PIL import Image as pil_img
 import torch
 import torch.backends.cudnn as cudnn
 from mafiaDetector.settings import *
@@ -23,6 +24,14 @@ from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.plots import Annotato
 from library.Detector.Yolov5_DeepSort_Pytorch.deep_sort.utils.parser import get_config
 from library.Detector.Yolov5_DeepSort_Pytorch.deep_sort.deep_sort import DeepSort
 from library.Detector.Yolov5_DeepSort_Pytorch.config import *
+
+from api.models.violation_model import Violation
+from api.models.violation_type_model import ViolationType
+from api.models.camera_model import Camera
+from api.models.image_model import Image
+from api.models.object_information_model import ObjectInformation
+
+from api.serializer import *
 
 class DetectorView(APIView):
     renderer_classes = [renderers.JSONRenderer]
@@ -51,10 +60,10 @@ class DetectorView(APIView):
     Path(str(DETECTED_ROOT) + '\\yeild').mkdir(parents=True, exist_ok=True)
     Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
 
-    violate_dict = dict()
 
-    # type_input_path 1 stream, 2 img or video
-    def detect(self, path, ratio, type_input_path, type_obj = None):
+    # type_input_path 1 stream, 2 img or  3 video
+    def detect(self, path, ratio, type_input_path, type_obj = None, camera_id = ''):
+        violate_dict = dict()
         source = path
         # Initialize
         self.half &= self.device.type != 'cpu'  # half precision only supported on CUDA
@@ -69,7 +78,7 @@ class DetectorView(APIView):
             cudnn.benchmark = True  # set True to speed up constant image size inference
             dataset = LoadStreams(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
             bs = len(dataset)  # batch_size
-        elif type_input_path == 2:
+        elif type_input_path == 2 or type_input_path == 3:
             dataset = LoadImages(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
             bs = 1  # batch_size
 
@@ -85,8 +94,6 @@ class DetectorView(APIView):
         if self.pt and self.device.type != 'cpu':
             self.model(torch.zeros(1, 3, *self.imgsz).to(self.device).type_as(next(self.model.model.parameters())))  # warmup
         dt, seen = [0.0, 0.0, 0.0, 0.0], 0
-
-
 
         for frame_idx, (path, img, im0s, vid_cap, s) in enumerate(dataset):
             t1 = time_sync()
@@ -115,13 +122,11 @@ class DetectorView(APIView):
                 if type_input_path == 1:  # batch_size >= 1
                     p, im0, _ = path[i], im0s[i].copy(), dataset.count
                     s += f'{i}: '
-                elif type_input_path == 2:
+                elif type_input_path == 2 or type_input_path == 2:
                     p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
 
-                # p = Path(p)  # to Path
-                # save_path = str(save_dir / p.name)  # im.jpg, vid.mp4, ...
-                # s += '%gx%g ' % img.shape[2:]  # print string
-
+                p = Path(p)  # to Path
+                save_path = str(DETECTED_ROOT / p.name)  # im.jpg, vid.mp4, ...
                 annotator = Annotator(im0, line_width=2, pil=not ascii)
 
                 if det is not None and len(det):
@@ -147,7 +152,7 @@ class DetectorView(APIView):
                     # draw boxes for visualization
                     if len(outputs) > 0:
 
-                        self.violate_dict = self.tracking_violate(outputs, ratio, self.violate_dict, type_obj)
+                        violate_dict = self.tracking_violate(outputs, ratio, violate_dict, type_obj)
                         for j, (output, conf) in enumerate(zip(outputs, confs)):
 
                             bboxes = output[0:4]
@@ -157,8 +162,9 @@ class DetectorView(APIView):
                             c = int(cls)  # integer class
 
                             color = GREEN
-                            if self.violate_dict is not None and id in self.violate_dict.keys():
-                                if self.violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls == 0:
+                            print(violate_dict)
+                            if violate_dict is not None and id in violate_dict.keys():
+                                if violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls == 0:
                                     list_person_violate = []
                                     img_person_violate = im0.copy()
                                     annotator_img_person_violate = Annotator(img_person_violate, line_width=2,
@@ -167,35 +173,67 @@ class DetectorView(APIView):
                                         if out[5] == 0:
                                             if self.cal_distance_img(bboxes, out[0:4]) <= MIN_DISTANCE * ratio:
                                                 list_person_violate.append([out[4], out[0:4]])
-                                                self.violate_dict[out[4]] = -1
+                                                violate_dict[out[4]] = -1
 
-                                    self.violate_dict[id] = -1
+                                    violate_dict[id] = -1
                                     for (id_person_violate, bbox) in list_person_violate:
                                         label_img_person_violate = f'{id_person_violate} person {conf:.2f}'
 
                                         annotator_img_person_violate.box_label(bbox, label, color=RED)
-                                    file_name = str(list_person_violate) + '.png'
+                                    file_name = str('Distance violation ' + str(datetime.now()) + '.png')
                                     save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name)
-
                                     label = f'{id} {names[c]} {conf:.2f}'
                                     annotator.box_label(bboxes, label, color=RED)
                                     saved_img = annotator_img_person_violate.result()  # RGB img
                                     saved_img = saved_img[..., ::-1]  # convert RGB to BGR img
-                                    img = Image.fromarray(saved_img, 'RGB')  # format BRG img to Image
+                                    img = pil_img.fromarray(saved_img, 'RGB')  # format BRG img to Image
                                     img.save(save_img_path)
+                                    distance_img = self.cal_distance_img(list_person_violate[0][1], list_person_violate[1][1])
+                                    distance_real = distance_img / ratio
+                                    if isinstance(distance_real, np.generic):
+                                        distance_real = np.asscalar(distance_real)
 
-                                if self.violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
-                                    file_name = str(bboxes) + '.png'
+                                    # with open(save_img_path, "rb") as image_file:
+                                    #     data = base64.b64encode(image_file.read())
+                                    # base64_string = str('data:image/png;base64,' + data.decode('utf-8'))
+                                    Image.objects.create(name = str('Distance violaion ' + str(datetime.now()).replace(':', '-')),
+                                                         url = save_img_path)
+                                    ##luu db
+                                    if type_input_path == 1:
+                                        camera_id = str(Camera.objects(id = camera_id).first().id)
+                                    else:
+                                        camera_id = ''
+
+                                    Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
+                                                             camera_id =  camera_id,
+                                                             image_id = Image.objects(url = save_img_path).first().id,
+                                                             class_id = ObjectInformation.objects(cardinality = c).first().id,
+                                                             distance = str(distance_real))
+
+                                if violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
+                                    file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-') + '.png')
                                     save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name)
-
                                     label = f'{id} {names[c]} {conf:.2f}'
                                     annotator.box_label(bboxes, label, color=RED)
                                     saved_img = annotator.result()  # RGB img
                                     saved_img = saved_img[..., ::-1]  # convert RGB to BGR img
-                                    img = Image.fromarray(saved_img, 'RGB')  # format BRG img to Image
+                                    img = pil_img.fromarray(saved_img, 'RGB')  # format BRG img to Image
                                     img.save(save_img_path)
 
-                                    self.violate_dict[id] = -1
+                                    violate_dict[id] = -1
+
+                                    Image.objects.create(name=str('Distance violaion ' + str(datetime.now())),
+                                                         url=save_img_path)
+
+                                    #luu db
+                                    if type_input_path == 1:
+                                        camera_id = str(Camera.objects(id = camera_id).first().id)
+                                    else:
+                                        camera_id = ''
+                                    Violation.objects.create(type_id=ViolationType.objects(name='Facemask').first().id,
+                                                             camera_id=camera_id,
+                                                             image_id=Image.objects(url=save_img_path).first().id,
+                                                             class_id = ObjectInformation.objects(cardinality = c).first().id)
                                     continue
                                 color = RED
 
@@ -216,6 +254,21 @@ class DetectorView(APIView):
 
                 # Stream results
                 im0 = annotator.result()
+
+                # if type_input_path != 2:
+                #     if vid_path != save_path:  # new video
+                #         vid_path = save_path
+                #         if isinstance(vid_writer, cv2.VideoWriter):
+                #             vid_writer.release()  # release previous video writer
+                #         if vid_cap:  # video
+                #             fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                #             w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                #             h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                #         else:  # stream
+                #             fps, w, h = 1, im0.shape[1], im0.shape[0]
+                #
+                #         vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                #     vid_writer.write(im0)
                 cv2.imwrite(str(DETECTED_ROOT) + '\\yeild\\img.jpg', im0)
                 img_path = str(DETECTED_ROOT) + '\\yeild\\img.jpg'
                 yield (b'--frame\r\n'
@@ -257,8 +310,6 @@ class DetectorView(APIView):
                         continue
                     else:
                         violate_dict[id_obj] = 1
-        # print(violate_dict)
-        # print(len(cent))
         if len(cent) != 0:
             D = dist.cdist(cent, cent, metric="euclidean")
             temp_vio_person = set()
@@ -310,16 +361,69 @@ class DetectorView(APIView):
 
     def get(self, request):
         try:
-            # path = 'http://192.168.1.8:8080/video'
-            path = 'C:\\Users\\phuct\\Desktop\\HoangPhuc\\Social_Distance_Detection\\Yolov5_DeepSort_Pytorch\\' \
-                   'dataset\\pedestrians_5s.mp4'
-            ratio = 0.8
-            # stream_url = 'http://82.208.151.106/cgi-bin/faststream.jpg?stream=half&fps=15&rand=COUNTER'
-            # type_input_path 1 stream, 2 img or video
-            return StreamingHttpResponse(self.detect(path = path,
-                                                     ratio = ratio,
-                                                     type_input_path = 2,
-                                                     type_obj = None),
-                                         content_type='multipart/x-mixed-replace; boundary=frame', status=200)
+            input_type = 0 # 1 img, 2 vid, 3 stream
+            save_input_video_path = ''
+            save_input_img_path = ''
+
+            ###
+            # Check that detect video or detect image
+            ###
+            # Detect from video
+            if request.data.get('video') is not None:
+                try:
+                    video = request.FILES['video']
+                    ratio = request.data['ratio']
+                    # Save video to 'detect' folder
+                    save_input_video_path = "%s\\%s" % (DETECT_ROOT, video.name)
+                    with open(save_input_video_path, "wb+") as vd:
+                        for chunk in video.chunks():
+                            vd.write(chunk)
+                    input_type = 1
+                except Exception as e:
+                    return Response({"status": "Wrong video file, image file or distance format"},
+                                    status=status.HTTP_400_BAD_REQUEST)
+            # Detect from image
+            elif request.data.get('img') is not None:
+                try:
+                    img = request.FILES['img']
+                    ratio = request.data['ratio']
+                    # Save image to 'detect' folder
+                    save_input_img_path = "%s\\%s" % (DETECT_ROOT, img.name)
+                    with open(save_input_img_path, "wb+") as f:
+                        for chunk in img.chunks():
+                            f.write(chunk)
+                    input_type = 2
+                except Exception as e:
+                    return Response({"status": "Wrong image format"}, status=status.HTTP_400_BAD_REQUEST)
+            elif request.data.get('stream_url') is not None:
+                try:
+                    stream_url = request.data['stream_url']
+                    ratio = request.data['ratio']
+                    obj_detect_type = request.data['obj_detect_type']
+                    camera_id= request.data['camera_id']
+                    input_type = 3
+                except Exception as e:
+                    return Response({"status": "Wrong input"}, status=status.HTTP_400_BAD_REQUEST)
+
+
+            if input_type == 1:
+                return StreamingHttpResponse(self.detect(path=save_input_video_path,
+                                                         ratio=float(ratio),
+                                                         type_input_path=2,
+                                                         type_obj=None),
+                                             content_type='multipart/x-mixed-replace; boundary=frame', status=200)
+            elif input_type == 2:
+                return StreamingHttpResponse(self.detect(path=save_input_img_path,
+                                                         ratio=float(ratio),
+                                                         type_input_path=2,
+                                                         type_obj=None),
+                                             content_type='multipart/x-mixed-replace; boundary=frame', status=200)
+            elif input_type == 3:
+                return StreamingHttpResponse(self.detect(path=stream_url,
+                                                         ratio=float(ratio),
+                                                         type_input_path=1,
+                                                         type_obj=str(obj_detect_type),
+                                                         camera_id = str(camera_id)),
+                                             content_type='multipart/x-mixed-replace; boundary=frame', status=200)
         except  Exception as e:
             return StreamingHttpResponse(e, content_type='text', status=404)
