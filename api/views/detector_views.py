@@ -1,5 +1,3 @@
-from library.Detector.object_detection import ObjectDetection
-# from library.Detector.object_tracking import detect_from_stream
 from django.http.response import StreamingHttpResponse
 from rest_framework.views import APIView
 from rest_framework import status, renderers
@@ -7,9 +5,6 @@ from rest_framework.response import Response
 import cv2
 import numpy as np
 from scipy.spatial import distance as dist
-import base64
-from io import BytesIO
-import math
 from datetime import datetime
 from PIL import Image as pil_img
 import torch
@@ -32,6 +27,8 @@ from api.models.image_model import Image
 from api.models.object_information_model import ObjectInformation
 
 from api.serializer import *
+
+
 
 class DetectorView(APIView):
     renderer_classes = [renderers.JSONRenderer]
@@ -59,30 +56,147 @@ class DetectorView(APIView):
     Path(DETECTED_ROOT).mkdir(parents=True, exist_ok=True)
     Path(str(DETECTED_ROOT) + '\\yeild').mkdir(parents=True, exist_ok=True)
     Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
+    # Initialize
+    half &= device.type != 'cpu'  # half precision only supported on CUDA
 
+    # Half
+    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+    if pt:
+        model.model.half() if half else model.model.float()
 
-    # type_input_path 1 stream, 2 img or  3 video
-    def detect(self, path, ratio, type_input_path, type_obj = None, camera_id = ''):
+    def detect(self, path, ratio):
+        try:
+            source = path
+            # Dataloader
+            dataset = LoadImages(source, img_size=self.imgsz, stride=self.stride, auto=self.pt)
+            bs = 1  # batch_size
+            vid_path, vid_writer = [None] * bs, [None] * bs
+
+            names = self.model.module.names if hasattr(self.model, 'module') else self.model.names
+            # Run inference
+            # self.model.warmup(imgsz=(1 if self.pt else bs, 3, *self.imgsz), half=self.half)  # warmup
+            dt, seen = [0.0, 0.0, 0.0], 0
+            for path, im, im0s, vid_cap, s in dataset:
+                t1 = time_sync()
+                im = torch.from_numpy(im).to(self.device)
+                im = im.half() if self.half else im.float()  # uint8 to fp16/32
+                im /= 255  # 0 - 255 to 0.0 - 1.0
+                if len(im.shape) == 3:
+                    im = im[None]  # expand for batch dim
+                t2 = time_sync()
+                dt[0] += t2 - t1
+
+                # Inference
+                pred = self.model(im, augment=True, visualize=False)
+                t3 = time_sync()
+                dt[1] += t3 - t2
+
+                # NMS
+                pred = non_max_suppression(prediction=pred, conf_thres=0.5, iou_thres=0.5, classes=None, agnostic=False,
+                                           max_det=1000)
+                dt[2] += time_sync() - t3
+
+                # Process predictions
+                for i, det in enumerate(pred):  # per image
+                    seen += 1
+                    p, im0, frame = path, im0s.copy(), getattr(dataset, 'frame', 0)
+
+                    p = Path(p)  # to Path
+                    save_path = str(DETECTED_ROOT / p.name)  # im.jpg
+                    annotator = Annotator(im0, line_width=2, example=str(names), pil=not ascii)
+                    if len(det):
+                        # Rescale boxes from img_size to im0 size
+                        det[:, :4] = scale_coords(im.shape[2:], det[:, :4], im0.shape).round()
+
+                        # Write results
+                        boxes = det[:, 0:4]
+                        confs = det[:, 4]
+                        clss = det[:, 5]
+                        center_points = np.array([(int(x + w / 2), int(y + h / 2)) for (x, y, w, h) in boxes])
+                        if len(center_points) != 0:
+
+                            D = dist.cdist(center_points, center_points, metric="euclidean")
+                            # Set to save all violations that can be duplicated
+                            violate = set()
+
+                            for k in range(0, D.shape[0]):
+                                for j in range(k + 1, D.shape[1]):
+                                    # Check to see if the distance between any two
+                                    # centroid pairs is less than the configured number
+                                    # of centimeter
+
+                                    # 138 pixel -> 500 cm
+                                    # D[i, j] pixel -> 200 cm
+                                    # distance = D[i, j] * KNOW_WIDTH / ref_img_width
+                                    if D[k, j] < MIN_DISTANCE / float(ratio):
+                                        # (x1, y1, w1, h1) = boxes[k]
+                                        # (x2, y2, w2, h2) = boxes[j]
+                                        # cent1 = [int(x1 + w1 / 2), int(y1 + h1 / 2)]
+                                        # cent2 = [int(x2 + w2 / 2), int(y2 + h2 / 2)]
+                                        #
+                                        # distance = D[k, j] * float(ratio) / 100
+                                        # distance = round(distance, 2)
+                                        # annotator.draw.line((cent1, cent2))
+                                        # annotator.text((cent1[0], cent1[1] - 5), str(distance), cv2.FONT_HERSHEY_SIMPLEX)
+                                        # cv2.line(im0, cent1, cent2, RED, 2)
+                                        # cv2.putText(im0, str(distance), (cent1[0], cent1[1] - 5),
+                                        #             cv2.FONT_HERSHEY_SIMPLEX, .5, RED)
+                                        violate.add(k)
+                                        violate.add(j)
+
+                        # Loop all bounding box to get object id and center point
+                        # to draw necessary information and save violations
+                        for l, (bbox) in enumerate(boxes):
+                            # extract the bounding box and centroid coordinates, then
+                            # initialize the color of the annotation
+                            color = GREEN
+                            (startX, startY, width, height) = bbox
+                            # if the index pair exists within the violation set, then
+                            # update the color
+                            if l in violate:
+                                color = RED
+                            if names[int(clss[l])] != 'person' and names[int(clss[l])] != 'mask':
+                                color = RED
+                            # draw (1) a bounding box around the person and (2) the
+                            # centroid coordinates of the person,
+                            annotator.box_label(bbox, str(names[int(clss[l])] + ' ' + str(round(float(confs[l]), 2))), color)
+                        #
+                        # c = int(cls)  # integer class
+                        # label = f'{names[c]} {conf:.2f}'
+                        # annotator.box_label(xyxy, label, color=GREEN)
+
+                    # Stream results
+                    im0 = annotator.result()
+
+                    # Save results (image with detections)
+                    if dataset.mode == 'image':
+                        cv2.imwrite(save_path, im0)
+                    else:  # 'video' or 'stream'
+                        if vid_path[i] != save_path:  # new video
+                            vid_path[i] = save_path
+                            if isinstance(vid_writer[i], cv2.VideoWriter):
+                                vid_writer[i].release()  # release previous video writer
+                            if vid_cap:  # video
+                                fps = vid_cap.get(cv2.CAP_PROP_FPS)
+                                w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                                h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                            else:  # stream
+                                fps, w, h = 30, im0.shape[1], im0.shape[0]
+                            save_path = str(Path(save_path).with_suffix('.avi'))  # force *.mp4 suffix on results videos
+                            vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
+                        vid_writer[i].write(im0)
+        except Exception as e:
+            return False
+        return True
+
+    def detect_from_stream(self, path, ratio, type_obj = None, camera_id = ''):
         violate_dict = dict()
         source = path
-        # Initialize
-        self.half &= self.device.type != 'cpu'  # half precision only supported on CUDA
-
-        # Half
-        self.half &= self.pt and self.device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
-        if self.pt:
-            self.model.model.half() if self.half else self.model.model.float()
 
         # Dataloader
-        if type_input_path == 1:
-            cudnn.benchmark = True  # set True to speed up constant image size inference
-            dataset = LoadStreams(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
-            bs = len(dataset)  # batch_size
-        elif type_input_path == 2 or type_input_path == 3:
-            dataset = LoadImages(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
-            bs = 1  # batch_size
-
-        vid_path, vid_writer = [None] * bs, [None] * bs
+        cudnn.benchmark = True  # set True to speed up constant image size inference
+        dataset = LoadStreams(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
+        bs = len(dataset)  # batch_size
 
         # Get names
         names = self.model.module.names if hasattr(self.model, 'module') else self.model.names
@@ -119,14 +233,7 @@ class DetectorView(APIView):
             # Process detections
             for i, det in enumerate(pred):  # detections per image
                 seen += 1
-                if type_input_path == 1:  # batch_size >= 1
-                    p, im0, _ = path[i], im0s[i].copy(), dataset.count
-                    s += f'{i}: '
-                elif type_input_path == 2 or type_input_path == 2:
-                    p, im0, _ = path, im0s.copy(), getattr(dataset, 'frame', 0)
-
-                p = Path(p)  # to Path
-                save_path = str(DETECTED_ROOT / p.name)  # im.jpg, vid.mp4, ...
+                p, im0, _ = path[i], im0s[i].copy(), dataset.count
                 annotator = Annotator(im0, line_width=2, pil=not ascii)
 
                 if det is not None and len(det):
@@ -193,19 +300,11 @@ class DetectorView(APIView):
                                     if isinstance(distance_real, np.generic):
                                         distance_real = np.asscalar(distance_real)
 
-                                    # with open(save_img_path, "rb") as image_file:
-                                    #     data = base64.b64encode(image_file.read())
-                                    # base64_string = str('data:image/png;base64,' + data.decode('utf-8'))
                                     Image.objects.create(name = str('Distance violaion ' + str(datetime.now()).replace(':', '-')),
                                                          url = save_img_path)
                                     ##luu db
-                                    if type_input_path == 1:
-                                        camera_id = str(Camera.objects(id = camera_id).first().id)
-                                    else:
-                                        camera_id = ''
-
                                     Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
-                                                             camera_id =  camera_id,
+                                                             camera_id = str(Camera.objects(id = camera_id).first().id),
                                                              image_id = Image.objects(url = save_img_path).first().id,
                                                              class_id = ObjectInformation.objects(cardinality = c).first().id,
                                                              distance = str(distance_real))
@@ -226,13 +325,10 @@ class DetectorView(APIView):
                                                          url=save_img_path)
 
                                     #luu db
-                                    if type_input_path == 1:
-                                        camera_id = str(Camera.objects(id = camera_id).first().id)
-                                    else:
-                                        camera_id = ''
-                                    Violation.objects.create(type_id=ViolationType.objects(name='Facemask').first().id,
-                                                             camera_id=camera_id,
-                                                             image_id=Image.objects(url=save_img_path).first().id,
+
+                                    Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
+                                                             camera_id = str(Camera.objects(id = camera_id).first().id) ,
+                                                             image_id = Image.objects(url=save_img_path).first().id,
                                                              class_id = ObjectInformation.objects(cardinality = c).first().id)
                                     continue
                                 color = RED
@@ -255,20 +351,6 @@ class DetectorView(APIView):
                 # Stream results
                 im0 = annotator.result()
 
-                # if type_input_path != 2:
-                #     if vid_path != save_path:  # new video
-                #         vid_path = save_path
-                #         if isinstance(vid_writer, cv2.VideoWriter):
-                #             vid_writer.release()  # release previous video writer
-                #         if vid_cap:  # video
-                #             fps = vid_cap.get(cv2.CAP_PROP_FPS)
-                #             w = int(vid_cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-                #             h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-                #         else:  # stream
-                #             fps, w, h = 1, im0.shape[1], im0.shape[0]
-                #
-                #         vid_writer = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
-                #     vid_writer.write(im0)
                 cv2.imwrite(str(DETECTED_ROOT) + '\\yeild\\img.jpg', im0)
                 img_path = str(DETECTED_ROOT) + '\\yeild\\img.jpg'
                 yield (b'--frame\r\n'
@@ -407,21 +489,19 @@ class DetectorView(APIView):
 
 
             if input_type == 1:
-                return StreamingHttpResponse(self.detect(path=save_input_video_path,
-                                                         ratio=float(ratio),
-                                                         type_input_path=2,
-                                                         type_obj=None),
-                                             content_type='multipart/x-mixed-replace; boundary=frame', status=200)
+                if self.detect(save_input_video_path, ratio):
+                    return Response({'status': 'success'}, status=status.HTTP_200_OK)
+                else:
+                    return Response({'status': 'fail'}, status=status.HTTP_404_NOT_FOUND)
             elif input_type == 2:
-                return StreamingHttpResponse(self.detect(path=save_input_img_path,
-                                                         ratio=float(ratio),
-                                                         type_input_path=2,
-                                                         type_obj=None),
-                                             content_type='multipart/x-mixed-replace; boundary=frame', status=200)
+                if self.detect(save_input_img_path, ratio):
+                    return Response({'status': 'success'}, status=status.HTTP_200_OK)
+                else:
+                    return Response({'status': 'fail'}, status=status.HTTP_404_NOT_FOUND)
+
             elif input_type == 3:
-                return StreamingHttpResponse(self.detect(path=stream_url,
+                return StreamingHttpResponse(self.detect_from_stream(path=stream_url,
                                                          ratio=float(ratio),
-                                                         type_input_path=1,
                                                          type_obj=str(obj_detect_type),
                                                          camera_id = str(camera_id)),
                                              content_type='multipart/x-mixed-replace; boundary=frame', status=200)
