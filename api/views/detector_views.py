@@ -201,10 +201,6 @@ class DetectorView(APIView):
         # Get names
         names = self.model.module.names if hasattr(self.model, 'module') else self.model.names
 
-        # extract what is in between the last '/' and last '.'
-        # txt_file_name = source.split('/')[-1].split('.')[0]
-        # txt_path = str(Path(save_dir)) + '/' + txt_file_name + '.txt'
-
         if self.pt and self.device.type != 'cpu':
             self.model(torch.zeros(1, 3, *self.imgsz).to(self.device).type_as(next(self.model.model.parameters())))  # warmup
         dt, seen = [0.0, 0.0, 0.0, 0.0], 0
@@ -353,8 +349,8 @@ class DetectorView(APIView):
 
                 cv2.imwrite(str(DETECTED_ROOT) + '\\yeild\\img.jpg', im0)
                 img_path = str(DETECTED_ROOT) + '\\yeild\\img.jpg'
-                yield (b'--frame\r\n'
-                       b'Content-Type: image/jpeg\r\n\r\n' + open(img_path, 'rb').read() + b'\r\n')
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + open(img_path, 'rb').read() + b'\r\n')
 
     # ['person', 'no mask', 'mask', 'wrong mask']
     def tracking_violate(self, outputs, ratio, violate_dict, type_obj):
@@ -491,19 +487,17 @@ class DetectorView(APIView):
             if input_type == 1:
                 if self.detect(save_input_video_path, ratio):
                     return Response({'status': 'success'}, status=status.HTTP_200_OK)
-                else:
-                    return Response({'status': 'fail'}, status=status.HTTP_404_NOT_FOUND)
             elif input_type == 2:
                 if self.detect(save_input_img_path, ratio):
                     return Response({'status': 'success'}, status=status.HTTP_200_OK)
-                else:
-                    return Response({'status': 'fail'}, status=status.HTTP_404_NOT_FOUND)
-
             elif input_type == 3:
+
                 return StreamingHttpResponse(self.detect_from_stream(path=stream_url,
                                                          ratio=float(ratio),
                                                          type_obj=str(obj_detect_type),
                                                          camera_id = str(camera_id)),
                                              content_type='multipart/x-mixed-replace; boundary=frame', status=200)
+
+            return Response({'status': 'fail'}, status=status.HTTP_404_NOT_FOUND)
         except  Exception as e:
-            return StreamingHttpResponse(e, content_type='text', status=404)
+            return Response({'status': 'fail'}, status=status.HTTP_404_NOT_FOUND)
