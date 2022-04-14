@@ -9,6 +9,8 @@ from datetime import datetime
 from PIL import Image as pil_img
 import torch
 import torch.backends.cudnn as cudnn
+
+from urllib.parse import unquote
 from mafiaDetector.settings import *
 from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.models.common import DetectMultiBackend
 from library.Detector.Yolov5_DeepSort_Pytorch.yolov5.utils.datasets import LoadImages, LoadStreams
@@ -296,14 +298,14 @@ class DetectorView(APIView):
                                     if isinstance(distance_real, np.generic):
                                         distance_real = np.asscalar(distance_real)
 
-                                    Image.objects.create(name = str('Distance violaion ' + str(datetime.now()).replace(':', '-')),
-                                                         url = save_img_path)
-                                    ##luu db
-                                    Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
-                                                             camera_id = str(Camera.objects(id = camera_id).first().id),
-                                                             image_id = Image.objects(url = save_img_path).first().id,
-                                                             class_id = ObjectInformation.objects(cardinality = c).first().id,
-                                                             distance = str(distance_real))
+                                    # Image.objects.create(name = str('Distance violaion ' + str(datetime.now()).replace(':', '-')),
+                                    #                      url = save_img_path)
+                                    # ##luu db
+                                    # Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
+                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id),
+                                    #                          image_id = Image.objects(url = save_img_path).first().id,
+                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id,
+                                    #                          distance = str(distance_real))
 
                                 if violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
                                     file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-') + '.png')
@@ -321,11 +323,10 @@ class DetectorView(APIView):
                                                          url=save_img_path)
 
                                     #luu db
-
-                                    Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
-                                                             camera_id = str(Camera.objects(id = camera_id).first().id) ,
-                                                             image_id = Image.objects(url=save_img_path).first().id,
-                                                             class_id = ObjectInformation.objects(cardinality = c).first().id)
+                                    # Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
+                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id) ,
+                                    #                          image_id = Image.objects(url=save_img_path).first().id,
+                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id)
                                     continue
                                 color = RED
 
@@ -438,6 +439,24 @@ class DetectorView(APIView):
         return distance_img / ratio
 
     def get(self, request):
+        # print(request.GET.get('stream_url'))
+        stream_url = request.GET.get('stream_url')
+        print(stream_url)
+        ratio = request.GET.get('ratio')
+        obj_detect_type = request.GET.get('obj_detect_type')
+        camera_id = request.GET.get('camera_id')
+        if stream_url is not None:
+            try:
+                return StreamingHttpResponse(self.detect_from_stream(path= stream_url,
+                                                                     ratio=ratio,
+                                                                     type_obj=obj_detect_type,
+                                                                     camera_id=camera_id),
+                                             content_type='multipart/x-mixed-replace; boundary=frame', status=200 )
+            except Exception as e:
+                return Response({"status": "Wrong input"}, status=status.HTTP_400_BAD_REQUEST)
+        return Response({"status": "fail"}, status=status.HTTP_404_NOT_FOUND)
+
+    def post(self, request):
         try:
             input_type = 0 # 1 img, 2 vid, 3 stream
             save_input_video_path = ''
@@ -473,15 +492,6 @@ class DetectorView(APIView):
                     input_type = 2
                 except Exception as e:
                     return Response({"status": "Wrong image format"}, status=status.HTTP_400_BAD_REQUEST)
-            elif request.data.get('stream_url') is not None:
-                try:
-                    stream_url = request.data['stream_url']
-                    ratio = request.data['ratio']
-                    obj_detect_type = request.data['obj_detect_type']
-                    camera_id= request.data['camera_id']
-                    input_type = 3
-                except Exception as e:
-                    return Response({"status": "Wrong input"}, status=status.HTTP_400_BAD_REQUEST)
 
 
             if input_type == 1:
@@ -490,13 +500,6 @@ class DetectorView(APIView):
             elif input_type == 2:
                 if self.detect(save_input_img_path, ratio):
                     return Response({'status': 'success'}, status=status.HTTP_200_OK)
-            elif input_type == 3:
-
-                return StreamingHttpResponse(self.detect_from_stream(path=stream_url,
-                                                         ratio=float(ratio),
-                                                         type_obj=str(obj_detect_type),
-                                                         camera_id = str(camera_id)),
-                                             content_type='multipart/x-mixed-replace; boundary=frame', status=200)
 
             return Response({'status': 'fail'}, status=status.HTTP_404_NOT_FOUND)
         except  Exception as e:
