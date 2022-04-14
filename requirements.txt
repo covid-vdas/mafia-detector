@@ -62,3 +62,10 @@ urllib3==1.26.8
 Werkzeug==2.1.1
 zipp==3.8.0
 zope.interface==5.4.0
+gdown
+easydict
+mongoengine
+pymongo==3.12.3
+python-dotenv
+"pymongo[srv]"
+django-rest-framework-mongoengine
