@@ -276,7 +276,7 @@ class DetectorView(APIView):
                                                                              pil=not ascii)
                                     for out in outputs:
                                         if out[5] == 0:
-                                            if self.cal_distance_img(bboxes, out[0:4]) <= MIN_DISTANCE * ratio:
+                                            if self.cal_distance_img(bboxes, out[0:4]) <= MIN_DISTANCE * float(ratio):
                                                 list_person_violate.append([out[4], out[0:4]])
                                                 violate_dict[out[4]] = -1
 
@@ -285,27 +285,28 @@ class DetectorView(APIView):
                                         label_img_person_violate = f'{id_person_violate} person {conf:.2f}'
 
                                         annotator_img_person_violate.box_label(bbox, label, color=RED)
-                                    file_name = str('Distance violation ' + str(datetime.now()) + '.png')
+                                    file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-') + '.png')
                                     save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name)
                                     label = f'{id} {names[c]} {conf:.2f}'
                                     annotator.box_label(bboxes, label, color=RED)
                                     saved_img = annotator_img_person_violate.result()  # RGB img
                                     saved_img = saved_img[..., ::-1]  # convert RGB to BGR img
                                     img = pil_img.fromarray(saved_img, 'RGB')  # format BRG img to Image
+                                    print(str(datetime.now()))
                                     img.save(save_img_path)
                                     distance_img = self.cal_distance_img(list_person_violate[0][1], list_person_violate[1][1])
-                                    distance_real = distance_img / ratio
+                                    distance_real = distance_img /float(ratio)
                                     if isinstance(distance_real, np.generic):
                                         distance_real = np.asscalar(distance_real)
-
-                                    # Image.objects.create(name = str('Distance violaion ' + str(datetime.now()).replace(':', '-')),
-                                    #                      url = save_img_path)
-                                    # ##luu db
-                                    # Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
-                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id),
-                                    #                          image_id = Image.objects(url = save_img_path).first().id,
-                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id,
-                                    #                          distance = str(distance_real))
+                                   
+                                    Image.objects.create(name = str('Distance violaion ' + str(datetime.now()).replace(':', '-')),
+                                                         url = save_img_path)
+                                    ##luu db
+                                    Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
+                                                             camera_id = str(Camera.objects(id = camera_id).first().id),
+                                                             image_id = Image.objects(url = save_img_path).first().id,
+                                                             class_id = ObjectInformation.objects(cardinality = c).first().id,
+                                                             distance = str(distance_real))
 
                                 if violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
                                     file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-') + '.png')
@@ -323,10 +324,10 @@ class DetectorView(APIView):
                                                          url=save_img_path)
 
                                     #luu db
-                                    # Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
-                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id) ,
-                                    #                          image_id = Image.objects(url=save_img_path).first().id,
-                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id)
+                                    Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
+                                                             camera_id = str(Camera.objects(id = camera_id).first().id) ,
+                                                             image_id = Image.objects(url=save_img_path).first().id,
+                                                             class_id = ObjectInformation.objects(cardinality = c).first().id)
                                     continue
                                 color = RED
 
@@ -403,7 +404,7 @@ class DetectorView(APIView):
                     # distance = D[i, j] * KNOW_WIDTH / ref_img_width
                     # print("D[i, j]: ", D[i, j])
 
-                    if D[i, j] < MIN_DISTANCE * ratio:  # ref_img_width / OBJECT_DISTANCE
+                    if D[i, j] < MIN_DISTANCE * float(ratio):  # ref_img_width / OBJECT_DISTANCE
 
                         if violate_dict is not None:
                             # distance = D[i, j] / ratio #real distance between two people
