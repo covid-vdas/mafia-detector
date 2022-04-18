@@ -5,13 +5,13 @@ DEEP_SORT_MODEL = 'library/Detector/Yolov5_DeepSort_Pytorch/deep_sort/deep/check
 
 CLASS_PATH = "library/Detector/Yolov5_DeepSort_Pytorch/weights/vdas.names"
 OUTPUT_PATH = 'library/Detector/output'
-YOLO_MODEL = 'library/Detector/Yolov5_DeepSort_Pytorch/weights/best-0407-4.pt'
+YOLO_MODEL = 'library/Detector/Yolov5_DeepSort_Pytorch/weights/7th-3.pt'
 
 ONNX_PATH = 'library/Detector/Yolov5_DeepSort_Pytorch/weights/best-0312-5.onnx'
 
 INPUT_WIDTH = 640
 INPUT_HEIGHT = 640
-CONF_VIO_CONTINUOUS_FRAME = 10
+CONF_VIO_CONTINUOUS_FRAME = 24
 MIN_CONFIDENCE_RATE = 0.4
 NMS_THRESH = 0.4
 MIN_DISTANCE = 200

@@ -285,8 +285,8 @@ class DetectorView(APIView):
                                         label_img_person_violate = f'{id_person_violate} person {conf:.2f}'
 
                                         annotator_img_person_violate.box_label(bbox, label, color=RED)
-                                    file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-') + '.png')
-                                    save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name)
+                                    file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-'))
+                                    save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name+".png")
                                     label = f'{id} {names[c]} {conf:.2f}'
                                     annotator.box_label(bboxes, label, color=RED)
                                     saved_img = annotator_img_person_violate.result()  # RGB img
@@ -299,9 +299,9 @@ class DetectorView(APIView):
                                     if isinstance(distance_real, np.generic):
                                         distance_real = np.asscalar(distance_real)
                                    
-                                    Image.objects.create(name = str('Distance violaion ' + str(datetime.now()).replace(':', '-')),
+                                    Image.objects.create(name = file_name,
                                                          url = save_img_path)
-                                    ##luu db
+                                    #luu db
                                     Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
                                                              camera_id = str(Camera.objects(id = camera_id).first().id),
                                                              image_id = Image.objects(url = save_img_path).first().id,
@@ -309,19 +309,22 @@ class DetectorView(APIView):
                                                              distance = str(distance_real))
 
                                 if violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
-                                    file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-') + '.png')
-                                    save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name)
+                                    file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-'))
+                                    save_img_path = "%s\\%s" % (DETECTED_ROOT, file_name  + '.png')
                                     label = f'{id} {names[c]} {conf:.2f}'
                                     annotator.box_label(bboxes, label, color=RED)
                                     saved_img = annotator.result()  # RGB img
                                     saved_img = saved_img[..., ::-1]  # convert RGB to BGR img
                                     img = pil_img.fromarray(saved_img, 'RGB')  # format BRG img to Image
                                     img.save(save_img_path)
-
+                                    
+                                    print(file_name);
+                                    print(save_img_path);
                                     violate_dict[id] = -1
 
-                                    Image.objects.create(name=str('Distance violaion ' + str(datetime.now())),
+                                    Image.objects.create(name = file_name,
                                                          url=save_img_path)
+
 
                                     #luu db
                                     Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,

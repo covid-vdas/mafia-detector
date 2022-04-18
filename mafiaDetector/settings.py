@@ -18,9 +18,10 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 CORS_ALLOW_ALL_ORIGINS = True
 
-ALLOWED_HOSTS = [
-    '.herokuapp.com'
-]
+DEBUG = True
+
+
+ALLOWED_HOSTS = []
 
 
 # Quick-start development settings - unsuitable for production
@@ -30,9 +31,6 @@ ALLOWED_HOSTS = [
 SECRET_KEY = 'django-insecure-@u$54+673%kx*!ig9k3)!3qjf-v9sx*$9+v7u!yku+q=@io)5('
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
-
-ALLOWED_HOSTS = []
 
 
 # Application definition
