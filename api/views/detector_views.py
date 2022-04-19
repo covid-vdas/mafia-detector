@@ -45,7 +45,7 @@ class DetectorView(APIView):
                         max_iou_distance=cfg.DEEPSORT.MAX_IOU_DISTANCE,
                         max_age=cfg.DEEPSORT.MAX_AGE, n_init=cfg.DEEPSORT.N_INIT, nn_budget=cfg.DEEPSORT.NN_BUDGET,
                         )
-    half = True
+    half = False;
 
     # Load model
     device = select_device()
@@ -58,11 +58,11 @@ class DetectorView(APIView):
     Path(DETECTED_ROOT).mkdir(parents=True, exist_ok=True)
     Path(str(DETECTED_ROOT) + '\\yeild').mkdir(parents=True, exist_ok=True)
     Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
-    # Initialize
-    half &= device.type != 'cpu'  # half precision only supported on CUDA
+    # # Initialize
+    # half &= device.type != 'cpu'  # half precision only supported on CUDA
 
-    # Half
-    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+    # # Half
+    # half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
     if pt:
         model.model.half() if half else model.model.float()
 
