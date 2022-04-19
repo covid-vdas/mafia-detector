@@ -21,7 +21,7 @@ CORS_ALLOW_ALL_ORIGINS = True
 DEBUG = True
 
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '192.168.1.108']
 
 
 # Quick-start development settings - unsuitable for production
