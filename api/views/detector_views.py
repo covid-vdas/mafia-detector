@@ -58,17 +58,21 @@ class DetectorView(APIView):
     Path(DETECTED_ROOT).mkdir(parents=True, exist_ok=True)
     Path(str(DETECTED_ROOT) + '\\yeild').mkdir(parents=True, exist_ok=True)
     Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
-    # Initialize
-    half &= device.type != 'cpu'  # half precision only supported on CUDA
-
-    # Half
-    half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
-    if pt:
-        model.model.half() if half else model.model.float()
 
     def detect(self, path, ratio):
         try:
             source = path
+
+            self.half = False
+
+            # Initialize
+            self.half &= self.device.type != 'cpu'  # half precision only supported on CUDA
+
+            # Half
+            self.half &= self.pt and self.device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+            if self.pt:
+                self.model.model.half() if self.half else self.model.model.float()
+
             # Dataloader
             dataset = LoadImages(source, img_size=self.imgsz, stride=self.stride, auto=self.pt)
             bs = 1  # batch_size
@@ -194,6 +198,16 @@ class DetectorView(APIView):
     def detect_from_stream(self, path, ratio, type_obj = None, camera_id = ''):
         violate_dict = dict()
         source = path
+
+        self.half = True
+
+        # Initialize
+        self.half &= self.device.type != 'cpu'  # half precision only supported on CUDA
+
+        # Half
+        self.half &= self.pt and self.device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+        if self.pt:
+            self.model.model.half() if self.half else self.model.model.float()
 
         # Dataloader
         cudnn.benchmark = True  # set True to speed up constant image size inference
