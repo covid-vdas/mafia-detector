@@ -184,7 +184,7 @@ class DetectorView(APIView):
                                 h = int(vid_cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
                             else:  # stream
                                 fps, w, h = 30, im0.shape[1], im0.shape[0]
-                            save_path = str(Path(save_path).with_suffix('.avi'))  # force *.mp4 suffix on results videos
+                            save_path = str(Path(save_path).with_suffix('.mp4'))  # force *.mp4 suffix on results videos
                             vid_writer[i] = cv2.VideoWriter(save_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (w, h))
                         vid_writer[i].write(im0)
         except Exception as e:
@@ -299,14 +299,14 @@ class DetectorView(APIView):
                                     if isinstance(distance_real, np.generic):
                                         distance_real = np.asscalar(distance_real)
                                    
-                                    Image.objects.create(name = file_name,
-                                                         url = save_img_path)
-                                    #luu db
-                                    Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
-                                                             camera_id = str(Camera.objects(id = camera_id).first().id),
-                                                             image_id = Image.objects(url = save_img_path).first().id,
-                                                             class_id = ObjectInformation.objects(cardinality = c).first().id,
-                                                             distance = str(distance_real))
+                                    # Image.objects.create(name = file_name,
+                                    #                      url = save_img_path)
+                                    # #luu db
+                                    # Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
+                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id),
+                                    #                          image_id = Image.objects(url = save_img_path).first().id,
+                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id,
+                                    #                          distance = str(distance_real))
 
                                 if violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
                                     file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-'))
@@ -322,15 +322,15 @@ class DetectorView(APIView):
                                     print(save_img_path);
                                     violate_dict[id] = -1
 
-                                    Image.objects.create(name = file_name,
-                                                         url=save_img_path)
+                                    # Image.objects.create(name = file_name,
+                                    #                      url=save_img_path)
 
 
-                                    #luu db
-                                    Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
-                                                             camera_id = str(Camera.objects(id = camera_id).first().id) ,
-                                                             image_id = Image.objects(url=save_img_path).first().id,
-                                                             class_id = ObjectInformation.objects(cardinality = c).first().id)
+                                    # #luu db
+                                    # Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
+                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id) ,
+                                    #                          image_id = Image.objects(url=save_img_path).first().id,
+                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id)
                                     continue
                                 color = RED
 

@@ -5,7 +5,7 @@ DEEP_SORT_MODEL = 'library/Detector/Yolov5_DeepSort_Pytorch/deep_sort/deep/check
 
 CLASS_PATH = "library/Detector/Yolov5_DeepSort_Pytorch/weights/vdas.names"
 OUTPUT_PATH = 'library/Detector/output'
-YOLO_MODEL = 'library/Detector/Yolov5_DeepSort_Pytorch/weights/7th-3.pt'
+YOLO_MODEL = 'library/Detector/Yolov5_DeepSort_Pytorch/weights/8th-3.pt'
 
 ONNX_PATH = 'library/Detector/Yolov5_DeepSort_Pytorch/weights/best-0312-5.onnx'
 
