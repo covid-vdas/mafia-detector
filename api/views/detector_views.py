@@ -58,17 +58,21 @@ class DetectorView(APIView):
     Path(DETECTED_ROOT).mkdir(parents=True, exist_ok=True)
     Path(str(DETECTED_ROOT) + '\\yeild').mkdir(parents=True, exist_ok=True)
     Path(OUTPUT_PATH).mkdir(parents=True, exist_ok=True)
-    # # Initialize
-    # half &= device.type != 'cpu'  # half precision only supported on CUDA
-
-    # # Half
-    # half &= pt and device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
-    if pt:
-        model.model.half() if half else model.model.float()
 
     def detect(self, path, ratio):
         try:
             source = path
+
+            self.half = False
+
+            # Initialize
+            self.half &= self.device.type != 'cpu'  # half precision only supported on CUDA
+
+            # Half
+            self.half &= self.pt and self.device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+            if self.pt:
+                self.model.model.half() if self.half else self.model.model.float()
+
             # Dataloader
             dataset = LoadImages(source, img_size=self.imgsz, stride=self.stride, auto=self.pt)
             bs = 1  # batch_size
@@ -195,6 +199,16 @@ class DetectorView(APIView):
         violate_dict = dict()
         source = path
 
+        self.half = True
+
+        # Initialize
+        self.half &= self.device.type != 'cpu'  # half precision only supported on CUDA
+
+        # Half
+        self.half &= self.pt and self.device.type != 'cpu'  # half precision only supported by PyTorch on CUDA
+        if self.pt:
+            self.model.model.half() if self.half else self.model.model.float()
+
         # Dataloader
         cudnn.benchmark = True  # set True to speed up constant image size inference
         dataset = LoadStreams(source, img_size=self.imgsz, stride=self.stride, auto=self.pt and not self.jit)
@@ -298,7 +312,7 @@ class DetectorView(APIView):
                                     distance_real = distance_img /float(ratio)
                                     if isinstance(distance_real, np.generic):
                                         distance_real = np.asscalar(distance_real)
-                                   
+
                                     # Image.objects.create(name = file_name,
                                     #                      url = save_img_path)
                                     # #luu db
@@ -317,7 +331,7 @@ class DetectorView(APIView):
                                     saved_img = saved_img[..., ::-1]  # convert RGB to BGR img
                                     img = pil_img.fromarray(saved_img, 'RGB')  # format BRG img to Image
                                     img.save(save_img_path)
-                                    
+
                                     print(file_name);
                                     print(save_img_path);
                                     violate_dict[id] = -1
