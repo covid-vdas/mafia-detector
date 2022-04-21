@@ -313,14 +313,14 @@ class DetectorView(APIView):
                                     if isinstance(distance_real, np.generic):
                                         distance_real = np.asscalar(distance_real)
 
-                                    # Image.objects.create(name = file_name,
-                                    #                      url = save_img_path)
-                                    # #luu db
-                                    # Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
-                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id),
-                                    #                          image_id = Image.objects(url = save_img_path).first().id,
-                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id,
-                                    #                          distance = str(distance_real))
+                                    Image.objects.create(name = file_name,
+                                                         url = save_img_path)
+                                    #luu db
+                                    Violation.objects.create(type_id = ViolationType.objects(name = 'Distance').first().id,
+                                                             camera_id = str(Camera.objects(id = camera_id).first().id),
+                                                             image_id = Image.objects(url = save_img_path).first().id,
+                                                             class_id = ObjectInformation.objects(cardinality = c).first().id,
+                                                             distance = str(distance_real))
 
                                 if violate_dict[id] >= CONF_VIO_CONTINUOUS_FRAME and cls != 0:
                                     file_name = str('Distance violation ' + str(datetime.now()).replace(':', '-'))
@@ -336,15 +336,15 @@ class DetectorView(APIView):
                                     print(save_img_path);
                                     violate_dict[id] = -1
 
-                                    # Image.objects.create(name = file_name,
-                                    #                      url=save_img_path)
+                                    Image.objects.create(name = file_name,
+                                                         url=save_img_path)
 
 
-                                    # #luu db
-                                    # Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
-                                    #                          camera_id = str(Camera.objects(id = camera_id).first().id) ,
-                                    #                          image_id = Image.objects(url=save_img_path).first().id,
-                                    #                          class_id = ObjectInformation.objects(cardinality = c).first().id)
+                                    #luu db
+                                    Violation.objects.create(type_id = ViolationType.objects(name='Facemask').first().id,
+                                                             camera_id = str(Camera.objects(id = camera_id).first().id) ,
+                                                             image_id = Image.objects(url=save_img_path).first().id,
+                                                             class_id = ObjectInformation.objects(cardinality = c).first().id)
                                     continue
                                 color = RED
 
